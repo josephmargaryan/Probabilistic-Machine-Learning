@@ -35,7 +35,20 @@ This project requires the following Python libraries:
 - `matplotlib`
 - `sklearn`
 
-To install the necessary dependencies, run:
+## Theory Behind the Model
+### Bayesian Neural Networks
+A Bayesian neural network (BNN) estimates a probability distribution over its weights rather than a single point estimate, providing a principled way to quantify uncertainty in predictions.
+### Circulant Matrices and FFT
+Circulant matrices allow for efficient computation of matrix-vector products using the Fast Fourier Transform (FFT). Instead of multiplying matrices directly, which can be computationally expensive, FFT reduces the complexity by transforming the matrix multiplication into a pointwise product in the Fourier domain.
+### HMCECS (Hamiltonian Monte Carlo with Energy Conserving Subsampling)
+HMCECS is a Hamiltonian Monte Carlo (HMC) variant designed to handle large datasets' mini-batches efficiently. It estimates the likelihood of the entire dataset using only a small subset (mini-batch) of data while conserving energy in the Hamiltonian system.
+### Model Training
+The model is trained using a combination of:
 
-```bash
-pip install -r requirements.txt
+- **Subsampling Monte Carlo (HMCECS) to draw posterior samples overweights.**
+- **SVI (Stochastic Variational Inference) to initialize the parameters for the MCMC method.**
+## References
+- **Numpyro: https://num.pyro.ai/en/stable/**
+- **Fast Fourier Transform: https://en.wikipedia.org/wiki/Fast_Fourier_transform**
+- **HMCECS: Hamiltonian Monte Carlo with Energy Conserving Subsampling, Dang et al., (2019)**
+
