@@ -4,133 +4,102 @@ from tqdm import tqdm
 import numpy as np
 
 
-class MaxEntropyBase:
-    def __init__(self, msa_data, reg_lambda=0.01, use_gpu=False):
+class MaxEntropyModel:
+    def __init__(self, data, n_categories, reg_lambda=0.01, use_gpu=False):
         """
-        Base class for Maximum Entropy models.
+        Maximum Entropy model with adjustable dimensions for domain flexibility.
 
         Parameters:
-        - msa_data (np.array): Multiple sequence alignment data (n_sequences, n_positions).
+        - data (np.array): Input data (n_samples, n_features).
+        - n_categories (int): Number of unique categories per feature (e.g., 20 for amino acids).
         - reg_lambda (float): Regularization parameter.
         - use_gpu (bool): Whether to use GPU for computation.
         """
         self.device = torch.device(
             "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
         )
-        self.msa_data = torch.tensor(msa_data, dtype=torch.long, device=self.device)
-        self.n_sequences, self.n_positions = msa_data.shape
-        self.n_amino_acids = 20  # Standard number of amino acids
+        self.data = torch.tensor(data, dtype=torch.long, device=self.device)
+        self.n_samples, self.n_features = data.shape
+        self.n_categories = n_categories
         self.reg_lambda = reg_lambda
 
-        # One-hot encoding of MSA data
-        self.msa_onehot = self._one_hot_encode(self.msa_data)
+        # One-hot encoding of data
+        self.data_onehot = self._one_hot_encode(self.data)
 
-        # Parameters to be initialized in subclasses
-        self.h = None  # Biases
-        self.J = None  # Couplings
+        # Parameters
+        self.h = torch.zeros(
+            (self.n_features, self.n_categories), device=self.device, requires_grad=True
+        )
+        self.J = torch.zeros(
+            (self.n_features, self.n_features, self.n_categories, self.n_categories),
+            device=self.device,
+            requires_grad=True,
+        )
+
+        # Enforce diagonal of J to be zero for non-self interactions
+        self.J.data[torch.arange(self.n_features), torch.arange(self.n_features)] = 0
+
+        # Calculate empirical frequencies
+        self.compute_empirical_probabilities()
 
     def _one_hot_encode(self, data):
         """
-        One-hot encode the MSA data.
+        One-hot encode the input data.
 
         Returns:
-        - torch.Tensor: One-hot encoded data (n_sequences, n_positions, n_amino_acids).
+        - torch.Tensor: One-hot encoded data (n_samples, n_features, n_categories).
         """
         one_hot = torch.zeros(
-            (self.n_sequences, self.n_positions, self.n_amino_acids), device=self.device
+            (self.n_samples, self.n_features, self.n_categories), device=self.device
         )
         one_hot.scatter_(2, data.unsqueeze(-1), 1)
         return one_hot
 
     def compute_empirical_probabilities(self):
         """
-        Compute empirical marginal and pairwise probabilities from MSA data.
+        Compute empirical marginal and pairwise probabilities from data.
         """
         # Single-site frequencies
         self.fi = torch.mean(
-            self.msa_onehot, dim=0
-        )  # Shape: (n_positions, n_amino_acids)
+            self.data_onehot, dim=0
+        )  # Shape: (n_features, n_categories)
 
         # Pairwise frequencies
         self.fij = (
-            torch.einsum("sik,sjl->ijkl", self.msa_onehot, self.msa_onehot)
-            / self.n_sequences
-        )
-        # Shape: (n_positions, n_positions, n_amino_acids, n_amino_acids)
-
-    def visualize_empirical_probabilities(self):
-        """
-        Visualize empirical marginal probabilities as a heatmap.
-        """
-        fi_numpy = self.fi.detach().cpu().numpy()
-        plt.figure(figsize=(10, 6))
-        plt.imshow(fi_numpy.T, aspect="auto", cmap="viridis")
-        plt.colorbar()
-        plt.title("Empirical Marginal Probabilities")
-        plt.xlabel("Position")
-        plt.ylabel("Amino Acid Index")
-        plt.show()
-
-
-class MLEOptimizer(MaxEntropyBase):
-    def __init__(self, msa_data, reg_lambda=0.01, use_gpu=False):
-        super().__init__(msa_data, reg_lambda, use_gpu)
-        self.h = torch.zeros(
-            (self.n_positions, self.n_amino_acids),
-            device=self.device,
-            requires_grad=True,
-        )
-        self.J = torch.zeros(
-            (
-                self.n_positions,
-                self.n_positions,
-                self.n_amino_acids,
-                self.n_amino_acids,
-            ),
-            device=self.device,
-            requires_grad=True,
+            torch.einsum("sik,sjl->ijkl", self.data_onehot, self.data_onehot)
+            / self.n_samples
         )
 
-        # Initialize empirical probabilities
-        self.compute_empirical_probabilities()
-
-    def _energy(self, seq_onehot):
+    def _compute_pseudo_likelihood(self, seq_onehot):
         """
-        Compute energy for a given sequence.
-
+        Compute pseudo-likelihood approximation for a given sequence.
         Parameters:
-        - seq_onehot (torch.Tensor): One-hot encoded sequence (n_positions, n_amino_acids).
-
+        - seq_onehot (torch.Tensor): One-hot encoded sequence.
         Returns:
-        - torch.Tensor: Energy scalar.
+        - torch.Tensor: Approximate likelihood.
         """
-        # Single-site terms
         h_terms = torch.sum(self.h * seq_onehot)
 
-        # Pairwise terms using torch.einsum
+        # Calculate pairwise interactions while excluding self-interactions
         J_terms = torch.einsum("ia,jb,ijab->", seq_onehot, seq_onehot, self.J)
-
-        return -(h_terms + J_terms)
-
-    def _compute_hamiltonian(self, seq_onehot):
-        """
-        Compute Hamiltonian (energy) for a given sequence.
-        """
-        # Single-site terms
-        h_terms = torch.sum(self.h * seq_onehot)
-
-        # Pairwise terms using torch.einsum
-        J_terms = torch.einsum("ia,jb,ijab->", seq_onehot, seq_onehot, self.J)
-
-        return -(h_terms + J_terms)
+        energy = -(h_terms + J_terms)
+        return energy
 
     def _log_likelihood(self):
-        energies = [self._compute_hamiltonian(seq) for seq in self.msa_onehot]
+        """
+        Compute approximate log-likelihood using pseudo-likelihood.
+
+        Returns:
+        - torch.Tensor: Negative log-likelihood.
+        """
+        energies = [self._compute_pseudo_likelihood(seq) for seq in self.data_onehot]
         energies = torch.stack(energies)
-        logZ = torch.logsumexp(-energies, dim=0) - torch.log(
-            torch.tensor(len(energies), dtype=torch.float32, device=self.device)
-        )
-        neg_log_likelihood = torch.mean(energies) + logZ
+
+        # Approximate partition function Z with mean energies
+        logZ = torch.mean(energies)
+        neg_log_likelihood = torch.mean(energies) - logZ
+
+        # Regularization term for L2 penalty on parameters
         reg = self.reg_lambda * (torch.sum(self.h**2) + torch.sum(self.J**2))
         return neg_log_likelihood + reg
 
@@ -144,7 +113,7 @@ class MLEOptimizer(MaxEntropyBase):
         """
         optimizer = torch.optim.Adam([self.h, self.J], lr=lr)
         self.loss_history = []
-        pbar = tqdm(range(max_iter), desc="Training MLEOptimizer")
+        pbar = tqdm(range(max_iter), desc="Training MaxEntropyModel")
 
         for epoch in pbar:
             optimizer.zero_grad()
@@ -162,20 +131,14 @@ class MLEOptimizer(MaxEntropyBase):
         Returns:
         - np.array: DI matrix.
         """
-        # Compute the direct probabilities (P_dir)
+        # Compute direct probabilities
         P_dir = torch.exp(self.J)
-        P_dir = P_dir / torch.sum(
-            P_dir, dim=(2, 3), keepdim=True
-        )  # Normalize over amino acids
+        P_dir = P_dir / torch.sum(P_dir, dim=(2, 3), keepdim=True)  # Normalize
 
-        fi = self.fi.unsqueeze(1).unsqueeze(
-            3
-        )  # Shape: (n_positions, 1, n_amino_acids, 1)
-        fj = self.fi.unsqueeze(0).unsqueeze(
-            2
-        )  # Shape: (1, n_positions, 1, n_amino_acids)
+        fi = self.fi.unsqueeze(1).unsqueeze(3)  # Reshape fi
+        fj = self.fi.unsqueeze(0).unsqueeze(2)  # Reshape fj
 
-        # Compute DI
+        # Compute Direct Information (DI) from normalized probabilities
         DI = torch.sum(P_dir * torch.log((P_dir + 1e-8) / (fi * fj + 1e-8)), dim=(2, 3))
         return DI.detach().cpu().numpy()
 
@@ -208,33 +171,37 @@ class MLEOptimizer(MaxEntropyBase):
         plt.imshow(coupling_matrix, cmap="viridis")
         plt.colorbar()
         plt.title("Coupling Matrix")
-        plt.xlabel("Position i")
-        plt.ylabel("Position j")
+        plt.xlabel("Feature i")
+        plt.ylabel("Feature j")
         plt.show()
 
 
+# Example test function for domain flexibility
 def test():
-    # Generate synthetic MSA data
+    # Generate synthetic data for testing
     np.random.seed(42)
-    msa_data = np.random.randint(0, 20, (100, 50))  # 100 sequences, 50 positions
+    test_data = np.random.randint(
+        0, 20, (100, 50)
+    )  # 100 samples, 50 features, 20 categories
 
-    # Initialize and train the MLE optimizer
-    mle_optimizer = MLEOptimizer(msa_data, reg_lambda=0.01, use_gpu=False)
-    mle_optimizer.fit(max_iter=50, lr=0.05)
-    mle_optimizer.visualize()
+    # Initialize and train the model
+    model = MaxEntropyModel(test_data, n_categories=20, reg_lambda=0.01, use_gpu=False)
+    model.fit(max_iter=50, lr=0.05)
+    model.visualize()
 
     # Predict coupling matrix and compute DI
-    coupling_matrix = mle_optimizer.predict()
-    DI_matrix = mle_optimizer.compute_direct_information()
-    print(coupling_matrix)
-    print(DI_matrix)
+    coupling_matrix = model.predict()
+    DI_matrix = model.compute_direct_information()
+    print("Coupling Matrix:\n", coupling_matrix)
+    print("Direct Information Matrix:\n", DI_matrix)
+
     # Visualize DI matrix
     plt.figure(figsize=(6, 5))
     plt.imshow(DI_matrix, cmap="hot")
     plt.colorbar()
     plt.title("Direct Information Matrix")
-    plt.xlabel("Position i")
-    plt.ylabel("Position j")
+    plt.xlabel("Feature i")
+    plt.ylabel("Feature j")
     plt.show()
 
 
