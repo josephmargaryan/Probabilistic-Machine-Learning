@@ -1,8 +1,0 @@
-numpyro
-jax jaxlib  # Install CPU versions
-pyro-ppl
-torch
-matplotlib
-scipy
-tqdm
-numpy
